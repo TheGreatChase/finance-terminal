@@ -4,33 +4,32 @@ import requests
 import plotly.graph_objects as go
 from datetime import datetime
 
-# --- 1. INSTITUTIONAL UI: GOLDMAN SLATE THEME ---
+# --- 1. INSTITUTIONAL LIGHT THEME (Marquee Slate) ---
 st.set_page_config(page_title="Finance Terminal", layout="wide")
 
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; color: #e0e0e0; font-family: 'Inter', sans-serif; }
-    [data-testid="stMetricValue"] { color: #ffffff !important; font-size: 28px !important; font-weight: 700 !important; }
-    [data-testid="stMetricLabel"] { color: #9da5b1 !important; text-transform: uppercase; letter-spacing: 1.5px; font-size: 12px !important; }
-    .stDataFrame { border: 1px solid #30363d; border-radius: 4px; }
-    button[aria-selected="true"] { border-bottom: 3px solid #3d94ff !important; color: #ffffff !important; background-color: #1c2128 !important; }
-    .stTabs [data-baseweb="tab-list"] { background-color: #0e1117; padding: 0px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre; }
+    /* High-contrast Slate background with White content areas */
+    .main { background-color: #f0f2f6; color: #1a1c23; font-family: 'Inter', sans-serif; }
+    [data-testid="stMetricValue"] { color: #0052cc !important; font-size: 30px !important; font-weight: 700 !important; }
+    [data-testid="stMetricLabel"] { color: #5e6c84 !important; text-transform: uppercase; font-size: 13px !important; font-weight: 600; }
+    .stDataFrame { border: 1px solid #dfe1e6; background-color: #ffffff; }
+    /* Navigation styling */
+    button[aria-selected="true"] { border-bottom: 3px solid #0052cc !important; color: #0052cc !important; font-weight: 700 !important; }
+    .stTabs [data-baseweb="tab-list"] { background-color: #ffffff; padding: 10px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. DATA ENGINE: SEC EDGAR ARCHITECTURE ---
+# --- 2. SEC DATA ENGINE ---
 class SECEngine:
-    HEADERS = {'User-Agent': "InstitutionalTerminal researcher@example.com"}
+    HEADERS = {'User-Agent': "TerminalApp researcher@example.com"}
 
     @staticmethod
     @st.cache_data
-    def get_ticker_map():
+    def get_cik_map():
         url = "https://www.sec.gov/files/company_tickers.json"
-        try:
-            r = requests.get(url, headers=SECEngine.HEADERS)
-            return {v['ticker']: str(v['cik_str']).zfill(10) for k, v in r.json().items()}
-        except: return {}
+        r = requests.get(url, headers=SECEngine.HEADERS)
+        return {v['ticker']: str(v['cik_str']).zfill(10) for k, v in r.json().items()}
 
     @staticmethod
     @st.cache_data(ttl=3600)
@@ -40,114 +39,103 @@ class SECEngine:
         return r.json() if r.status_code == 200 else None
 
     @staticmethod
-    def get_clean_metric(data, tag, annual=True):
+    def get_clean_metric(data, tag):
+        """Standardizes 15-year history and eliminates duplicate filings per year."""
         try:
             facts = data['facts']['us-gaap'][tag]['units']['USD']
             df = pd.DataFrame(facts)
             df['end'] = pd.to_datetime(df['end'])
-            if annual:
-                df = df[df['form'] == '10-K']
-            return df.sort_values('end').drop_duplicates('end', keep='last')
+            df['year'] = df['end'].dt.year
+            # Sort and keep the most recent filing (handles 10-K/A amendments)
+            return df.sort_values(['year', 'end']).drop_duplicates('year', keep='last')
         except: return pd.DataFrame()
 
-    @staticmethod
-    def scale_data(df):
-        """Intelligently scales financials and returns the unit label."""
-        if df.empty or 'val' not in df.columns: return df, "Units"
-        max_val = df['val'].abs().max()
-        if max_val >= 1e9:
-            df['val_scaled'] = (df['val'] / 1e9).round(2)
-            return df, "Billions"
-        if max_val >= 1e6:
-            df['val_scaled'] = (df['val'] / 1e6).round(2)
-            return df, "Millions"
-        df['val_scaled'] = df['val']
-        return df, "Units"
-
-# --- 3. CORE INTERFACE ---
+# --- 3. TERMINAL INTERFACE ---
 def main():
     with st.sidebar:
         st.title("📂 Terminal")
-        ticker_map = SECEngine.get_ticker_map()
+        ticker_map = SECEngine.get_cik_map()
         ticker = st.text_input("SECURITY SEARCH", "AAPL").upper()
         st.divider()
-        st.caption("Direct SEC EDGAR Integration (15Y Depth)")
+        # Time-Travel selection
+        timeframe = st.radio("TIME-TRAVEL", ["1Y", "5Y", "10Y", "MAX"], index=3)
 
     if ticker not in ticker_map:
-        st.error("INVALID TICKER OR SECURITY NOT REGISTERED WITH SEC.")
+        st.error("TICKER NOT FOUND")
         return
 
     cik = ticker_map[ticker]
-    raw = SECEngine.fetch_sec_facts(cik)
-    if not raw:
-        st.error("DATA RETRIEVAL FAILURE: SEC SERVERS UNREACHABLE.")
-        return
+    raw_data = SECEngine.fetch_sec_facts(cik)
+    if not raw_data: return
 
-    rev_tag = next((t for t in ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet'] if t in raw['facts']['us-gaap']), 'Revenues')
-    
-    df_rev = SECEngine.get_clean_metric(raw, rev_tag)
-    df_net = SECEngine.get_clean_metric(raw, 'NetIncomeLoss')
-    
-    df_rev_scaled, unit_label = SECEngine.scale_data(df_rev.copy())
+    # Metric Extraction
+    rev_tag = next((t for t in ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax'] 
+                    if t in raw_data['facts']['us-gaap']), 'Revenues')
+    df_rev = SECEngine.get_clean_metric(raw_data, rev_tag)
+    df_net = SECEngine.get_clean_metric(raw_data, 'NetIncomeLoss')
 
+    # Apply Time-Travel Filters
+    curr_yr = datetime.now().year
+    lookback = {"1Y": 1, "5Y": 5, "10Y": 10, "MAX": 50}[timeframe]
+    df_rev = df_rev[df_rev['year'] >= curr_yr - lookback]
+    df_net = df_net[df_net['year'] >= curr_yr - lookback]
+
+    # --- ROW 1: KPI HERO ---
     st.header(f"Finance Terminal | {ticker}")
     c1, c2, c3, c4 = st.columns(4)
-    if not df_rev.empty:
-        latest = df_rev['val'].iloc[-1]
-        prev = df_rev['val'].iloc[-2] if len(df_rev) > 1 else latest
-        c1.metric("LTM REVENUE", f"${latest/1e9:.2f}B", f"{((latest/prev)-1)*100:+.2f}% YoY")
-        c2.metric("CIK IDENTIFIER", cik)
-        c3.metric("DATA DEPTH", f"{len(df_rev)} YEARS")
-        c4.metric("REPORTING UNIT", unit_label)
+    latest_rev = df_rev['val'].iloc[-1] if not df_rev.empty else 0
+    c1.metric("LTM REVENUE", f"${latest_rev/1e9:.2f}B")
+    c2.metric("DATA DEPTH", f"{len(df_rev)}Y")
+    c3.metric("TIME-FRAME", timeframe)
+    c4.metric("CIK", cik)
 
-    t_perf, t_stmt, t_ratio, t_dcf = st.tabs(["📈 PERFORMANCE", "📑 STATEMENTS", "📊 RATIO HISTORY", "💰 DCF VALUATION"])
+    # --- ROW 2: TABS ---
+    t_perf, t_stmt, t_ratio, t_dcf = st.tabs(["📈 PERFORMANCE", "📑 STATEMENTS", "📊 RATIO TRENDS", "💰 DCF"])
 
     with t_perf:
-        st.subheader("Historical Revenue Performance (USD)")
+        # Performance Line Graph
+        st.subheader(f"Historical Revenue Trajectory: {timeframe}")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df_rev['end'], y=df_rev['val'], mode='lines+markers', line=dict(color='#3d94ff', width=3)))
-        fig.update_layout(
-            template="plotly_dark", height=500,
-            xaxis_title="Filing Year", yaxis_title="Revenue (USD)",
-            margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified"
-        )
-        st.plotly_chart(fig, width='stretch')
+        fig.add_trace(go.Scatter(x=df_rev['year'], y=df_rev['val'], mode='lines+markers', 
+                                 line=dict(color='#0052cc', width=3), name="Annual Revenue"))
+        fig.update_layout(template="simple_white", height=500, xaxis_title="Fiscal Year", 
+                          yaxis_title="Revenue (USD)", hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+        
 
     with t_stmt:
-        st.subheader(f"Income Statement Data (Values in {unit_label})")
-        statement_df = df_rev_scaled[['end', 'val_scaled', 'form']].sort_values('end', ascending=False)
-        statement_df.columns = ['Filing Date', f'Revenue ({unit_label})', 'Form Type']
-        st.dataframe(statement_df, width='stretch', hide_index=True)
+        # Scaled Financial Statements
+        st.subheader("Standardized Income Statement (Billions USD)")
+        stmt_df = df_rev[['year', 'val', 'form']].sort_values('year', ascending=False).copy()
+        stmt_df['val'] = (stmt_df['val'] / 1e9).round(2)
+        stmt_df.columns = ["Year", "Revenue ($B)", "Filing Type"]
+        st.dataframe(stmt_df, use_container_width=True, hide_index=True)
 
     with t_ratio:
-        st.subheader("10-Year Profitability Trend (Net Margin)")
+        st.subheader("10-Year Profitability & Ratio Trends")
         if not df_rev.empty and not df_net.empty:
-            merged = pd.merge(df_rev, df_net, on='end', suffixes=('_r', '_n'))
+            merged = pd.merge(df_rev[['year', 'val']], df_net[['year', 'val']], on='year', suffixes=('_r', '_n'))
             merged['Net Margin (%)'] = (merged['val_n'] / merged['val_r'] * 100).round(2)
             
-            fig_r = go.Figure()
-            fig_r.add_trace(go.Bar(x=merged['end'], y=merged['Net Margin (%)'], marker_color='#3d94ff', name="Net Margin"))
-            fig_r.update_layout(template="plotly_dark", xaxis_title="Year", yaxis_title="Margin %", height=400)
-            st.plotly_chart(fig_r, width='stretch')
+            # Trend Chart
+            st.line_chart(merged.set_index('year')['Net Margin (%)'], color="#0052cc")
             
-            # FIX: Group by year to eliminate duplicate column names (pickling/PyArrow error)
-            ratio_tab = merged[['end', 'Net Margin (%)']].copy()
-            ratio_tab['end'] = ratio_tab['end'].dt.year
-            ratio_tab = ratio_tab.groupby('end').last().reset_index()
-            st.dataframe(ratio_tab.set_index('end').T, width='stretch')
+            # Ratio Horizontal Table (Unique Columns Guaranteed)
+            ratio_tab = merged[['year', 'Net Margin (%)']].set_index('year').T
+            st.dataframe(ratio_tab, use_container_width=True)
 
     with t_dcf:
-        st.subheader("Stage-2 Intrinsic Value Projection")
-        with st.container():
-            s1, s2 = st.columns(2)
-            growth = s1.slider("Terminal Growth Rate (%)", 0.0, 5.0, 2.0) / 100
-            wacc = s2.slider("WACC / Discount Rate (%)", 5.0, 15.0, 8.0) / 100
-            
-            if not df_rev.empty:
-                rev_base = df_rev['val'].iloc[-1]
-                terminal_val = (rev_base * (1 + growth)) / (wacc - growth)
-                intrinsic = (rev_base + terminal_val) / ((1 + wacc)**5)
-                st.metric("ESTIMATED INTRINSIC VALUE (REVENUE BASIS)", f"${intrinsic/1e9:,.2f}B")
+        st.subheader("Intrinsic Value Projection Matrix")
+        # Localized Controls
+        col_s1, col_s2 = st.columns(2)
+        growth = col_s1.slider("Terminal Growth (%)", 0.0, 5.0, 2.5) / 100
+        wacc = col_s2.slider("Discount Rate / WACC (%)", 5.0, 15.0, 8.5) / 100
+        
+        # Calculation
+        term_val = (latest_rev * (1 + growth)) / (wacc - growth)
+        fair_val = (latest_rev + term_val) / ((1 + wacc)**5)
+        st.metric("ESTIMATED FAIR VALUE (ANNUAL REVENUE BASIS)", f"${fair_val/1e9:.2f}B")
+        st.caption("Intrinsic value calculated using current annual revenue as FCF proxy.")
 
 if __name__ == "__main__":
     main()
