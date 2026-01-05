@@ -6,8 +6,7 @@ from curl_cffi import requests as curl_requests
 from datetime import datetime, timedelta
 
 # --- 1. TERMINAL CONFIGURATION ---
-# page_title sets the text for the browser tab
-st.set_page_config(page_title="Intelligence Terminal", layout="wide")
+st.set_page_config(page_title="Finance Terminal", layout="wide")
 
 # Bloomberg-Style Dark Mode CSS
 st.markdown("""
@@ -27,33 +26,35 @@ class QuantEngine:
     @st.cache_data(ttl=3600)
     def fetch_terminal_data(ticker):
         """
-        Fetches pricing and fundamental data using curl_cffi to impersonate
-        a Chrome browser session and bypass YFRateLimitErrors.
+        Fetches pricing and fundamentals. 
+        Crucial: We do NOT return the Ticker object 't' to avoid caching errors.
         """
         session = curl_requests.Session(impersonate="chrome")
         t = yf.Ticker(ticker, session=session)
         
         try:
+            # We extract all data locally within this function
             info = t.info
             hist = t.history(period="max")
-            if hist.empty:
-                return None, None, None, None, None, None
             
-            # Fundamentals
+            if hist.empty:
+                return None, None, None, None, None
+            
+            # Fundamentals extracted as serializable DataFrames
             is_stmt = t.financials
             bs = t.balance_sheet
             cf = t.cashflow
             
-            return t, info, hist, is_stmt, bs, cf
+            # Return only pickle-serializable data types
+            return info, hist, is_stmt, bs, cf
         except Exception as e:
             st.error(f"Data Retrieval Error: {e}")
-            return None, None, None, None, None, None
+            return None, None, None, None, None
 
     @staticmethod
     def calculate_valuation_ratios(info, bs):
-        """Calculates institutional valuation metrics from raw statement data."""
+        """Calculates institutional valuation metrics."""
         try:
-            mcap = info.get('marketCap', 0)
             equity = bs.loc['Stockholders Equity'][0] if 'Stockholders Equity' in bs.index else 0
             
             metrics = {
@@ -69,7 +70,6 @@ class QuantEngine:
 
 # --- 3. TERMINAL INTERFACE ---
 def main():
-    # Sidebar for search and DCF assumptions
     with st.sidebar:
         st.title("🗄️ Controls")
         ticker_input = st.text_input("SYMBOL SEARCH", "AAPL").upper()
@@ -77,17 +77,17 @@ def main():
         st.subheader("DCF Valuation Logic")
         growth = st.slider("Long-term Growth (%)", 0.0, 5.0, 2.5) / 100
         wacc = st.slider("Discount Rate / WACC (%)", 5.0, 15.0, 8.5) / 100
-        st.caption("Settings affect the DCF Valuation tab calculation.")
 
-    # Execution Layer
-    t, info, hist, is_stmt, bs, cf = QuantEngine.fetch_terminal_data(ticker_input)
+    # Execution Layer: Note the removed 't' from the return values
+    data_bundle = QuantEngine.fetch_terminal_data(ticker_input)
+    info, hist, is_stmt, bs, cf = data_bundle
 
     if not info or 'shortName' not in info:
-        st.error(f"FATAL: SECURITY '{ticker_input}' NOT FOUND IN MASTER DATABASE.")
+        st.error(f"FATAL: SECURITY '{ticker_input}' NOT FOUND.")
         return
 
-    # Header section
-    st.header(f"{info['shortName']} ({ticker_input}) | {info.get('industry', 'Sector Data Unavailable')}")
+    # Header section - renamed to Finance Terminal
+    st.header(f"Finance Terminal | {info['shortName']} ({ticker_input})")
     
     # Hero Metric Tiles
     m1, m2, m3, m4 = st.columns(4)
@@ -102,40 +102,23 @@ def main():
     ])
 
     with tab_price:
-        # High-Density Candlestick Chart
         fig = go.Figure(data=[go.Candlestick(
-            x=hist.index,
-            open=hist['Open'],
-            high=hist['High'],
-            low=hist['Low'],
-            close=hist['Close'],
-            name="Price"
+            x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name="Price"
         )])
-        
         fig.update_layout(
-            template="plotly_dark",
-            height=600,
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=0, r=0, t=30, b=0),
-            xaxis=dict(
-                rangeselector=dict(
-                    buttons=list([
-                        dict(count=1, label="1M", step="month", stepmode="backward"),
-                        dict(count=6, label="6M", step="month", stepmode="backward"),
-                        dict(count=1, label="YTD", step="year", stepmode="todate"),
-                        dict(count=1, label="1Y", step="year", stepmode="backward"),
-                        dict(count=5, label="5Y", step="year", stepmode="backward"),
-                        dict(step="all", label="MAX")
-                    ]),
-                    bgcolor="#1e222d"
-                ),
-                type="date"
-            )
+            template="plotly_dark", height=600, xaxis_rangeslider_visible=False,
+            xaxis=dict(rangeselector=dict(buttons=list([
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(count=5, label="5Y", step="year", stepmode="backward"),
+                dict(step="all", label="MAX")
+            ])), type="date")
         )
         st.plotly_chart(fig, use_container_width=True)
 
     with tab_fin:
-        # Statement Selection Logic
         st_choice = st.radio("VIEW", ["Income Statement", "Balance Sheet", "Cash Flow"], horizontal=True)
         if st_choice == "Income Statement":
             st.dataframe(is_stmt, use_container_width=True)
@@ -151,24 +134,19 @@ def main():
             r_cols = st.columns(len(ratios))
             for i, (label, val) in enumerate(ratios.items()):
                 r_cols[i].metric(label, val)
-        else:
-            st.warning("Data required for ratio calculation is missing for this ticker.")
 
     with tab_dcf:
         st.subheader("DCF Valuation Matrix")
         fcf = info.get('freeCashflow', 0)
         if fcf > 0:
             shares = info.get('sharesOutstanding', 1)
-            # Stage 1 & 2 Combined Projection
             term_val = (fcf * (1 + growth)) / (wacc - growth)
             fair_val_total = (fcf + term_val) / ((1 + wacc)**5)
             fair_price = fair_val_total / shares
-            
             upside = ((fair_price / info.get('currentPrice', 1)) - 1) * 100
             st.metric("ESTIMATED INTRINSIC VALUE", f"${fair_price:,.2f}", f"{upside:+.2f}% Upside")
-            st.info("Valuation based on trailing Free Cash Flow and customized Terminal Growth/WACC inputs.")
         else:
-            st.warning("Negative Free Cash Flow detected. Traditional DCF modeling unavailable.")
+            st.warning("Negative Free Cash Flow detected. DCF unavailable.")
 
 if __name__ == "__main__":
     main()
